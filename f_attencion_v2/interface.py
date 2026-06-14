@@ -68,8 +68,10 @@ class _OfficialLocalFlashAttentionFunction(torch.autograd.Function):
                 "f_attencion_v2_official_cuda no esta compilado. "
                 "Recompila con `python setup.py build_ext --inplace`."
             )
-        if q.dtype not in (torch.float16, torch.bfloat16):
-            raise ValueError("native_fast soporta float16 y bfloat16.")
+        if q.dtype is not torch.float16:
+            raise ValueError("native_fast actualmente compila solo float16.")
+        if q.shape[-1] not in (64, 128):
+            raise ValueError("native_fast actualmente compila solo head_dim 64 y 128.")
 
         scale_value = float(scale) if scale is not None else 1.0 / math.sqrt(q.shape[-1])
         q_bnhd = q.transpose(1, 2).contiguous()

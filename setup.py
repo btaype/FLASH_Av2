@@ -8,11 +8,21 @@ ROOT = Path(__file__).parent
 OFFICIAL_ROOT = ROOT / "csrc" / "flash_attn_official"
 OFFICIAL_SRC = OFFICIAL_ROOT / "src"
 CUTLASS_INCLUDE = ROOT / "csrc" / "cutlass" / "include"
+if not (CUTLASS_INCLUDE / "cute" / "tensor.hpp").exists():
+    raise RuntimeError(
+        "Falta CUTLASS/CuTe local. Copia csrc/cutlass/include dentro de "
+        "F_attencion_v2/csrc/cutlass/include antes de compilar."
+    )
 OFFICIAL_SOURCES = [
     OFFICIAL_ROOT / "flash_api.cpp",
-    *sorted(OFFICIAL_SRC.glob("flash_fwd_hdim*.cu")),
-    *sorted(OFFICIAL_SRC.glob("flash_fwd_split_hdim*.cu")),
-    *sorted(OFFICIAL_SRC.glob("flash_bwd_hdim*.cu")),
+    OFFICIAL_SRC / "flash_fwd_hdim64_fp16_sm80.cu",
+    OFFICIAL_SRC / "flash_fwd_hdim64_fp16_causal_sm80.cu",
+    OFFICIAL_SRC / "flash_fwd_hdim128_fp16_sm80.cu",
+    OFFICIAL_SRC / "flash_fwd_hdim128_fp16_causal_sm80.cu",
+    OFFICIAL_SRC / "flash_bwd_hdim64_fp16_sm80.cu",
+    OFFICIAL_SRC / "flash_bwd_hdim64_fp16_causal_sm80.cu",
+    OFFICIAL_SRC / "flash_bwd_hdim128_fp16_sm80.cu",
+    OFFICIAL_SRC / "flash_bwd_hdim128_fp16_causal_sm80.cu",
 ]
 
 OFFICIAL_NVCC_FLAGS = [

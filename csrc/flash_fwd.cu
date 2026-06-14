@@ -70,7 +70,7 @@ __global__ void flash_fwd_kernel_tiled(
             l_shared[warp_id] = 0.0f;
         }
     }
-    __syncthreads();
+    __syncwarp();
 
     const int q_base = offset4(batch, head, row, 0, H, N, D);
 
@@ -100,7 +100,7 @@ __global__ void flash_fwd_kernel_tiled(
                 scores[warp_id][j] = -INFINITY;
             }
         }
-        __syncthreads();
+        __syncwarp();
 
         if (active_warp && lane == 0) {
             float local_max = -INFINITY;
@@ -111,7 +111,7 @@ __global__ void flash_fwd_kernel_tiled(
             }
             tile_max[warp_id] = local_max;
         }
-        __syncthreads();
+        __syncwarp();
 
         if (active_warp) {
             const float old_m = m_shared[warp_id];
@@ -151,7 +151,7 @@ __global__ void flash_fwd_kernel_tiled(
                 m_shared[warp_id] = new_m;
             }
         }
-        __syncthreads();
+        __syncwarp();
     }
 
     if (row_valid) {

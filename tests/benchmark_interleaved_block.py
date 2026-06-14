@@ -185,7 +185,8 @@ def reset_grads(block: nn.Module, x: torch.Tensor) -> None:
 def measure_runner(block, x, runner, microbatch, measure, warmup, iters) -> float:
     def run_once():
         if measure == "fwd":
-            return runner(block, x, microbatch)
+            with torch.no_grad():
+                return runner(block, x, microbatch)
         reset_grads(block, x)
         out = runner(block, x, microbatch)
         loss = out.float().square().mean()

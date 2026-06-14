@@ -5,9 +5,9 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 
 ROOT = Path(__file__).parent
-REPO_ROOT = ROOT.parent
 OFFICIAL_ROOT = ROOT / "csrc" / "flash_attn_official"
 OFFICIAL_SRC = OFFICIAL_ROOT / "src"
+CUTLASS_INCLUDE = ROOT / "csrc" / "cutlass" / "include"
 OFFICIAL_SOURCES = [
     OFFICIAL_ROOT / "flash_api.cpp",
     *sorted(OFFICIAL_SRC.glob("flash_fwd_hdim*.cu")),
@@ -56,7 +56,7 @@ setup(
             include_dirs=[
                 str(OFFICIAL_ROOT),
                 str(OFFICIAL_SRC),
-                str(REPO_ROOT / "csrc" / "cutlass" / "include"),
+                str(CUTLASS_INCLUDE),
             ],
         ),
     ],

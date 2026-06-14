@@ -60,7 +60,7 @@ def benchmark_case(batch: int, heads: int, seqlen: int, head_dim: int, dtype, ca
     v = torch.randn_like(q, requires_grad=True)
 
     def ours():
-        return flash_attention_v2_backend(q, k, v, causal=causal, backend="auto")
+        return flash_attention_v2_backend(q, k, v, causal=causal, backend="native")
 
     def eager():
         return eager_attention(q, k, v, causal=causal)
@@ -72,7 +72,7 @@ def benchmark_case(batch: int, heads: int, seqlen: int, head_dim: int, dtype, ca
     ours_ms = time_ms(ours, warmup=warmup, iters=iters)
     eager_ms = time_ms(eager, warmup=warmup, iters=iters)
     ours_fwd_bwd_ms = benchmark_fwd_bwd(
-        lambda q_, k_, v_: flash_attention_v2_backend(q_, k_, v_, causal=causal, backend="auto"),
+        lambda q_, k_, v_: flash_attention_v2_backend(q_, k_, v_, causal=causal, backend="native"),
         q,
         k,
         v,
@@ -128,7 +128,7 @@ def main() -> None:
     print("Benchmark F_attencion_v2")
     print(f"device: {torch.cuda.get_device_name()}")
     print(f"dtype: {dtype}")
-    print("Nota: backend auto usa SDPA; backend native es una implementacion simple.")
+    print("Nota: este benchmark fuerza backend native de f_attencion_v2_cuda.")
 
     for head_dim in args.head_dims:
         if head_dim not in (64, 128):

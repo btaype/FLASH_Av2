@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 
-from flash_attn import flash_attn_qkvpacked_func
+from f_attencion_v2 import flash_attention_v2_backend
 
 
 def flops(batch, seqlen, headdim, nheads, causal, mode):
@@ -31,9 +31,9 @@ def sync():
     torch.cuda.synchronize()
 
 
-def measure_forward(qkv, causal, warmup, iters):
+def measure_forward(q, k, v, causal, warmup, iters):
     def run():
-        return flash_attn_qkvpacked_func(qkv, 0.0, causal=causal)
+        return flash_attention_v2_backend(q, k, v, causal=causal, backend="native")
 
     for _ in range(warmup):
         run()
@@ -49,11 +49,12 @@ def measure_forward(qkv, causal, warmup, iters):
     return start.elapsed_time(end) / iters
 
 
-def measure_fwd_bwd(qkv, causal, warmup, iters):
+def measure_fwd_bwd(q, k, v, causal, warmup, iters):
     def run():
-        if qkv.grad is not None:
-            qkv.grad = None
-        out = flash_attn_qkvpacked_func(qkv, 0.0, causal=causal)
+        for tensor in (q, k, v):
+            if tensor.grad is not None:
+                tensor.grad = None
+        out = flash_attention_v2_backend(q, k, v, causal=causal, backend="native")
         grad = torch.ones_like(out)
         out.backward(grad)
 
@@ -110,13 +111,13 @@ def make_plot(rows, out_dir):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Benchmark local de FlashAttention-2 para tu GPU.")
+    parser = argparse.ArgumentParser(description="Benchmark local de F_attencion_v2 native para tu GPU.")
     parser.add_argument("--seq-lens", type=int, nargs="+", default=[512, 1024, 2048, 4096, 8192, 16384])
     parser.add_argument("--headdims", type=int, nargs="+", default=[64, 128])
     parser.add_argument("--causal-values", choices=["true", "false", "both"], default="both")
     parser.add_argument("--model-dim", type=int, default=2048)
     parser.add_argument("--batch", type=int, default=1)
-    parser.add_argument("--dtype", choices=["float16", "bfloat16"], default="float16")
+    parser.add_argument("--dtype", choices=["float16", "float32"], default="float16")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=10)
     parser.add_argument("--out-dir", default="local_benchmark_results")
@@ -133,7 +134,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / "flash2_local_results.csv"
 
-    dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
+    dtype = torch.float16 if args.dtype == "float16" else torch.float32
     causal_values = [False, True] if args.causal_values == "both" else [args.causal_values == "true"]
 
     print(f"GPU: {torch.cuda.get_device_name()}")
@@ -169,14 +170,18 @@ def main():
                     "error": "",
                 }
                 try:
-                    qkv_fwd = torch.randn(
-                        args.batch, seqlen, 3, nheads, headdim,
+                    q_fwd = torch.randn(
+                        args.batch, nheads, seqlen, headdim,
                         device="cuda", dtype=dtype
                     )
-                    fwd_ms = measure_forward(qkv_fwd, causal, args.warmup, args.iters)
+                    k_fwd = torch.randn_like(q_fwd)
+                    v_fwd = torch.randn_like(q_fwd)
+                    fwd_ms = measure_forward(q_fwd, k_fwd, v_fwd, causal, args.warmup, args.iters)
 
-                    qkv_bwd = qkv_fwd.detach().clone().requires_grad_(True)
-                    fwd_bwd_ms = measure_fwd_bwd(qkv_bwd, causal, args.warmup, args.iters)
+                    q_bwd = q_fwd.detach().clone().requires_grad_(True)
+                    k_bwd = k_fwd.detach().clone().requires_grad_(True)
+                    v_bwd = v_fwd.detach().clone().requires_grad_(True)
+                    fwd_bwd_ms = measure_fwd_bwd(q_bwd, k_bwd, v_bwd, causal, args.warmup, args.iters)
 
                     row["fwd_ms"] = round(fwd_ms, 6)
                     row["fwd_bwd_ms"] = round(fwd_bwd_ms, 6)

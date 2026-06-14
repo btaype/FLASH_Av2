@@ -54,6 +54,7 @@ __global__ void flash_fwd_kernel_tiled(
     const bool row_valid = active_warp && row < N;
 
     __shared__ float scores[BLOCK_M][BLOCK_N_TILE];
+    __shared__ float probs[BLOCK_M][BLOCK_N_TILE];
     __shared__ float acc[BLOCK_M][MAX_HEAD_DIM];
     __shared__ float m_shared[BLOCK_M];
     __shared__ float l_shared[BLOCK_M];
@@ -121,8 +122,13 @@ __global__ void flash_fwd_kernel_tiled(
                 float local_sum = 0.0f;
                 if (row_valid) {
                     for (int j = 0; j < tile_count; ++j) {
-                        local_sum += expf(scores[warp_id][j] - new_m);
+                        const float p = expf(scores[warp_id][j] - new_m);
+                        probs[warp_id][j] = p;
+                        local_sum += p;
                     }
+                }
+                for (int j = tile_count; j < BLOCK_N_TILE; ++j) {
+                    probs[warp_id][j] = 0.0f;
                 }
                 tile_sum[warp_id] = local_sum;
             }
@@ -134,8 +140,7 @@ __global__ void flash_fwd_kernel_tiled(
                     for (int j = 0; j < tile_count; ++j) {
                         const int col_j = col_start + j;
                         const int v_index = offset4(batch, head, col_j, d, H, N, D);
-                        const float p = expf(scores[warp_id][j] - new_m);
-                        value_sum += p * to_float(v[v_index]);
+                        value_sum += probs[warp_id][j] * to_float(v[v_index]);
                     }
                 }
                 acc[warp_id][d] = alpha * acc[warp_id][d] + value_sum;

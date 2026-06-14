@@ -98,11 +98,23 @@ def run_micro_serial(block: SyntheticTransformerBlock, x: torch.Tensor, microbat
     return torch.cat(outputs, dim=0)
 
 
+_INTERLEAVED_STREAMS: dict[tuple[int, int], tuple[torch.cuda.Stream, torch.cuda.Stream]] = {}
+
+
+def get_interleaved_streams(num_chunks: int) -> tuple[torch.cuda.Stream, torch.cuda.Stream]:
+    device = torch.cuda.current_device()
+    key = (device, num_chunks)
+    streams = _INTERLEAVED_STREAMS.get(key)
+    if streams is None:
+        streams = (torch.cuda.Stream(device=device), torch.cuda.Stream(device=device))
+        _INTERLEAVED_STREAMS[key] = streams
+    return streams
+
+
 def run_interleaved(block: SyntheticTransformerBlock, x: torch.Tensor, microbatch: int) -> torch.Tensor:
     chunks = split_microbatches(x, microbatch)
     current_stream = torch.cuda.current_stream()
-    attn_stream = torch.cuda.Stream()
-    mlp_stream = torch.cuda.Stream()
+    attn_stream, mlp_stream = get_interleaved_streams(len(chunks))
     attn_done = [torch.cuda.Event() for _ in chunks]
     mlp_done = [torch.cuda.Event() for _ in chunks]
     attn_outputs: list[torch.Tensor | None] = [None] * len(chunks)

@@ -288,7 +288,8 @@ def main():
 
     modes = list(RUNNERS) if args.mode == "all" else [args.mode]
     rows = []
-    base_ms = None
+    full_ms = None
+    micro_serial_ms = None
     total_flops = block_fwd_flops(args.batch, args.seqlen, args.hidden_dim, args.mlp_ratio, args.causal)
     if args.measure == "fwd_bwd":
         total_flops *= 3.0
@@ -297,9 +298,12 @@ def main():
         torch.cuda.empty_cache()
         runner = RUNNERS[mode]
         ms = measure_runner(block, x, runner, args.microbatch, args.measure, args.warmup, args.iters)
-        if base_ms is None and mode == "full":
-            base_ms = ms
-        speedup = (base_ms / ms) if base_ms else 1.0
+        if mode == "full":
+            full_ms = ms
+        if mode == "micro_serial":
+            micro_serial_ms = ms
+        speedup_vs_full = (full_ms / ms) if full_ms else 1.0
+        speedup_vs_micro_serial = (micro_serial_ms / ms) if micro_serial_ms else 1.0
         row = {
             "mode": mode,
             "backend": args.backend,
@@ -314,13 +318,16 @@ def main():
             "ms": round(ms, 6),
             "tokens_s": round(args.batch * args.seqlen / (ms / 1000.0), 3),
             "tflops": round(tflops(total_flops, ms), 6),
-            "speedup_vs_full": round(speedup, 6),
+            "speedup_vs_full": round(speedup_vs_full, 6),
+            "speedup_vs_micro_serial": round(speedup_vs_micro_serial, 6),
             **{key: round(value, 8) for key, value in errors.items()},
         }
         rows.append(row)
         print(
             f"{mode:12s} {ms:.4f} ms | {row['tokens_s']:.1f} tok/s "
-            f"| {row['tflops']:.2f} TFLOPs/s | speedup_vs_full {speedup:.3f}x"
+            f"| {row['tflops']:.2f} TFLOPs/s "
+            f"| speedup_vs_full {speedup_vs_full:.3f}x "
+            f"| speedup_vs_micro_serial {speedup_vs_micro_serial:.3f}x"
         )
 
     with csv_path.open("w", newline="", encoding="utf-8") as f:

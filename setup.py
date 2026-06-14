@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from setuptools import find_packages, setup
+import torch
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 
@@ -8,6 +9,7 @@ ROOT = Path(__file__).parent
 OFFICIAL_ROOT = ROOT / "csrc" / "flash_attn_official"
 OFFICIAL_SRC = OFFICIAL_ROOT / "src"
 CUTLASS_INCLUDE = ROOT / "csrc" / "cutlass" / "include"
+TORCH_LIB = Path(torch.__file__).parent / "lib"
 if not (CUTLASS_INCLUDE / "cute" / "tensor.hpp").exists():
     raise RuntimeError(
         "Falta CUTLASS/CuTe local. Copia csrc/cutlass/include dentro de "
@@ -55,6 +57,8 @@ setup(
                 "cxx": ["-O2", "-std=c++17"],
                 "nvcc": ["-O2", "--use_fast_math", "-std=c++17"],
             },
+            library_dirs=[str(TORCH_LIB)],
+            runtime_library_dirs=[str(TORCH_LIB)],
         ),
         CUDAExtension(
             name="f_attencion_v2_official_cuda",
@@ -68,6 +72,8 @@ setup(
                 str(OFFICIAL_SRC),
                 str(CUTLASS_INCLUDE),
             ],
+            library_dirs=[str(TORCH_LIB)],
+            runtime_library_dirs=[str(TORCH_LIB)],
         ),
     ],
     cmdclass={"build_ext": BuildExtension},

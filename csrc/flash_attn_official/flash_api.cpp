@@ -241,14 +241,15 @@ void set_params_dgrad(Flash_bwd_params &params,
 }
 
 void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split_kernel=false) {
+    TORCH_CHECK(!params.is_bf16, "f_attencion_v2_official_cuda only compiles fp16 kernels");
+    TORCH_CHECK(params.d == 64 || params.d == 128,
+                "f_attencion_v2_official_cuda only compiles head_dim 64 and 128 kernels");
+    TORCH_CHECK(params.num_splits <= 1 && !force_split_kernel,
+                "f_attencion_v2_official_cuda was built without split-KV kernels");
     FP16_SWITCH(!params.is_bf16, [&] {
         HEADDIM_SWITCH(params.d, [&] {
             BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-                if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
-                    run_mha_fwd_<elem_type, kHeadDim, Is_causal>(params, stream);
-                } else {
-                    run_mha_fwd_splitkv_dispatch<elem_type, kHeadDim, Is_causal>(params, stream);
-                }
+                run_mha_fwd_<elem_type, kHeadDim, Is_causal>(params, stream);
             });
         });
     });
@@ -755,6 +756,9 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
 }
 
 void run_mha_bwd(Flash_bwd_params &params, cudaStream_t stream) {
+    TORCH_CHECK(!params.is_bf16, "f_attencion_v2_official_cuda only compiles fp16 kernels");
+    TORCH_CHECK(params.d == 64 || params.d == 128,
+                "f_attencion_v2_official_cuda only compiles head_dim 64 and 128 kernels");
     FP16_SWITCH(!params.is_bf16, [&] {
         HEADDIM_SWITCH(params.d, [&] {
             BOOL_SWITCH(params.is_causal, Is_causal, [&] {
@@ -1476,10 +1480,7 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
 } // namespace FLASH_NAMESPACE
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.doc() = "FlashAttention";
+    m.doc() = "F_attencion_v2 local FlashAttention-2 subset";
     m.def("fwd", &FLASH_NAMESPACE::mha_fwd, "Forward pass");
-    m.def("varlen_fwd", &FLASH_NAMESPACE::mha_varlen_fwd, "Forward pass (variable length)");
     m.def("bwd", &FLASH_NAMESPACE::mha_bwd, "Backward pass");
-    m.def("varlen_bwd", &FLASH_NAMESPACE::mha_varlen_bwd, "Backward pass (variable length)");
-    m.def("fwd_kvcache", &FLASH_NAMESPACE::mha_fwd_kvcache, "Forward pass, with KV-cache");
 }

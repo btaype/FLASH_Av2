@@ -19,6 +19,7 @@ constexpr int WARPS_PER_BLOCK = 4;
 constexpr int WARP_SIZE = 32;
 constexpr int ROWS_PER_BLOCK = WARPS_PER_BLOCK;
 
+#ifdef __CUDACC__
 template <typename scalar_t>
 __device__ inline float to_float(scalar_t x) {
     return static_cast<float>(x);
@@ -48,6 +49,7 @@ template <>
 __device__ inline void atomic_add_value<c10::Half>(c10::Half* address, float value) {
     atomicAdd(reinterpret_cast<__half*>(address), __float2half(value));
 }
+#endif
 
 __host__ inline void check_qkv(const torch::Tensor& q, const torch::Tensor& k, const torch::Tensor& v) {
     CHECK_INPUT(q);

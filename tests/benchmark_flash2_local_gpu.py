@@ -31,9 +31,9 @@ def sync():
     torch.cuda.synchronize()
 
 
-def measure_forward(q, k, v, causal, warmup, iters):
+def measure_forward(q, k, v, causal, warmup, iters, backend):
     def run():
-        return flash_attention_v2_backend(q, k, v, causal=causal, backend="native")
+        return flash_attention_v2_backend(q, k, v, causal=causal, backend=backend)
 
     for _ in range(warmup):
         run()
@@ -49,12 +49,12 @@ def measure_forward(q, k, v, causal, warmup, iters):
     return start.elapsed_time(end) / iters
 
 
-def measure_fwd_bwd(q, k, v, causal, warmup, iters):
+def measure_fwd_bwd(q, k, v, causal, warmup, iters, backend):
     def run():
         for tensor in (q, k, v):
             if tensor.grad is not None:
                 tensor.grad = None
-        out = flash_attention_v2_backend(q, k, v, causal=causal, backend="native")
+        out = flash_attention_v2_backend(q, k, v, causal=causal, backend=backend)
         grad = torch.ones_like(out)
         out.backward(grad)
 
@@ -118,6 +118,7 @@ def parse_args():
     parser.add_argument("--model-dim", type=int, default=2048)
     parser.add_argument("--batch", type=int, default=1)
     parser.add_argument("--dtype", choices=["float16", "float32"], default="float16")
+    parser.add_argument("--backend", choices=["native", "native_fast", "official", "sdpa", "auto"], default="native")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=10)
     parser.add_argument("--out-dir", default="local_benchmark_results")
@@ -142,6 +143,7 @@ def main():
     print(f"batch: {args.batch}")
     print(f"seq_lens: {args.seq_lens}")
     print(f"headdims: {args.headdims}")
+    print(f"backend: {args.backend}")
     print(f"salida CSV: {csv_path}")
 
     rows = []
@@ -176,12 +178,12 @@ def main():
                     )
                     k_fwd = torch.randn_like(q_fwd)
                     v_fwd = torch.randn_like(q_fwd)
-                    fwd_ms = measure_forward(q_fwd, k_fwd, v_fwd, causal, args.warmup, args.iters)
+                    fwd_ms = measure_forward(q_fwd, k_fwd, v_fwd, causal, args.warmup, args.iters, args.backend)
 
                     q_bwd = q_fwd.detach().clone().requires_grad_(True)
                     k_bwd = k_fwd.detach().clone().requires_grad_(True)
                     v_bwd = v_fwd.detach().clone().requires_grad_(True)
-                    fwd_bwd_ms = measure_fwd_bwd(q_bwd, k_bwd, v_bwd, causal, args.warmup, args.iters)
+                    fwd_bwd_ms = measure_fwd_bwd(q_bwd, k_bwd, v_bwd, causal, args.warmup, args.iters, args.backend)
 
                     row["fwd_ms"] = round(fwd_ms, 6)
                     row["fwd_bwd_ms"] = round(fwd_bwd_ms, 6)

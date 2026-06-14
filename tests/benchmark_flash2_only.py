@@ -25,9 +25,9 @@ def sync():
     torch.cuda.synchronize()
 
 
-def measure_forward(q, k, v, causal, warmup, repeats):
+def measure_forward(q, k, v, causal, warmup, repeats, backend):
     def run():
-        return flash_attention_v2_backend(q, k, v, causal=causal, backend="native")
+        return flash_attention_v2_backend(q, k, v, causal=causal, backend=backend)
 
     for _ in range(warmup):
         run()
@@ -43,12 +43,12 @@ def measure_forward(q, k, v, causal, warmup, repeats):
     return start.elapsed_time(end) / repeats / 1000.0
 
 
-def measure_backward(q, k, v, causal, warmup, repeats):
+def measure_backward(q, k, v, causal, warmup, repeats, backend):
     def run():
         for tensor in (q, k, v):
             if tensor.grad is not None:
                 tensor.grad = None
-        out = flash_attention_v2_backend(q, k, v, causal=causal, backend="native")
+        out = flash_attention_v2_backend(q, k, v, causal=causal, backend=backend)
         out.backward(torch.ones_like(out))
 
     for _ in range(warmup):
@@ -75,6 +75,7 @@ def parse_args():
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--dtype", choices=["float16", "float32"], default="float16")
+    parser.add_argument("--backend", choices=["native", "native_fast", "official", "sdpa", "auto"], default="native")
     return parser.parse_args()
 
 
@@ -87,6 +88,7 @@ def main():
     print(f"device: {torch.cuda.get_device_name()}")
     print(f"dtype: {dtype}")
     print(f"causal: {args.causal}")
+    print(f"backend: {args.backend}")
 
     for headdim in args.headdims:
         if args.model_dim % headdim != 0:
@@ -109,8 +111,8 @@ def main():
                 )
                 k = torch.randn_like(q, requires_grad=True)
                 v = torch.randn_like(q, requires_grad=True)
-                fwd_s = measure_forward(q, k, v, args.causal, args.warmup, args.repeats)
-                bwd_s = measure_backward(q, k, v, args.causal, args.warmup, args.repeats)
+                fwd_s = measure_forward(q, k, v, args.causal, args.warmup, args.repeats, args.backend)
+                bwd_s = measure_backward(q, k, v, args.causal, args.warmup, args.repeats, args.backend)
                 total_s = fwd_s + bwd_s
                 fwd_tflops = efficiency_tflops(
                     attention_flops(batch_size, seqlen, headdim, nheads, args.causal, "fwd"),

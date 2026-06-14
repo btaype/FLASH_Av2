@@ -54,7 +54,7 @@ def benchmark_fwd_bwd(fn, q, k, v, warmup: int, iters: int) -> float:
     return time_ms(run, warmup=warmup, iters=iters)
 
 
-def gradient_max_error(q, k, v, causal: bool) -> float:
+def gradient_max_error(q, k, v, causal: bool, backend: str) -> float:
     native_q = q.detach().clone().requires_grad_(True)
     native_k = k.detach().clone().requires_grad_(True)
     native_v = v.detach().clone().requires_grad_(True)
@@ -62,7 +62,7 @@ def gradient_max_error(q, k, v, causal: bool) -> float:
     eager_k = k.detach().clone().requires_grad_(True)
     eager_v = v.detach().clone().requires_grad_(True)
 
-    native_out = flash_attention_v2_backend(native_q, native_k, native_v, causal=causal, backend="native")
+    native_out = flash_attention_v2_backend(native_q, native_k, native_v, causal=causal, backend=backend)
     eager_out = eager_attention(eager_q, eager_k, eager_v, causal=causal)
     native_out.backward(torch.ones_like(native_out))
     eager_out.backward(torch.ones_like(eager_out))
@@ -85,13 +85,14 @@ def benchmark_case(
     warmup: int,
     iters: int,
     check_grad: bool,
+    backend: str,
 ):
     q = torch.randn(batch, heads, seqlen, head_dim, device="cuda", dtype=dtype, requires_grad=True)
     k = torch.randn_like(q, requires_grad=True)
     v = torch.randn_like(q, requires_grad=True)
 
     def ours():
-        return flash_attention_v2_backend(q, k, v, causal=causal, backend="native")
+        return flash_attention_v2_backend(q, k, v, causal=causal, backend=backend)
 
     def eager():
         return eager_attention(q, k, v, causal=causal)
@@ -99,12 +100,12 @@ def benchmark_case(
     ours_out = ours()
     ref_out = eager()
     max_error = (ours_out - ref_out).abs().max().item()
-    grad_error = gradient_max_error(q, k, v, causal) if check_grad else float("nan")
+    grad_error = gradient_max_error(q, k, v, causal, backend) if check_grad else float("nan")
 
     ours_ms = time_ms(ours, warmup=warmup, iters=iters)
     eager_ms = time_ms(eager, warmup=warmup, iters=iters)
     ours_fwd_bwd_ms = benchmark_fwd_bwd(
-        lambda q_, k_, v_: flash_attention_v2_backend(q_, k_, v_, causal=causal, backend="native"),
+        lambda q_, k_, v_: flash_attention_v2_backend(q_, k_, v_, causal=causal, backend=backend),
         q,
         k,
         v,
@@ -128,6 +129,7 @@ def benchmark_case(
 
     print(
         f"causal={causal} batch={batch} heads={heads} seqlen={seqlen} head_dim={head_dim} "
+        f"backend={backend} "
         f"| ours {ours_ms:.4f} ms {ours_tflops:.4f} TFLOPs/s "
         f"| eager {eager_ms:.4f} ms {eager_tflops:.4f} TFLOPs/s "
         f"| speedup_fwd {speedup_fwd:.2f}x "
@@ -148,6 +150,7 @@ def parse_args():
     parser.add_argument("--iters", type=int, default=30)
     parser.add_argument("--no-causal", action="store_true")
     parser.add_argument("--skip-grad-check", action="store_true")
+    parser.add_argument("--backend", choices=["native", "native_fast", "official", "sdpa", "auto"], default="native")
     return parser.parse_args()
 
 
@@ -162,7 +165,7 @@ def main() -> None:
     print("Benchmark F_attencion_v2")
     print(f"device: {torch.cuda.get_device_name()}")
     print(f"dtype: {dtype}")
-    print("Nota: este benchmark fuerza backend native de f_attencion_v2_cuda.")
+    print(f"Nota: este benchmark usa backend {args.backend} de f_attencion_v2.")
 
     for head_dim in args.head_dims:
         if head_dim not in (64, 128):
@@ -178,6 +181,7 @@ def main() -> None:
                 warmup=args.warmup,
                 iters=args.iters,
                 check_grad=not args.skip_grad_check,
+                backend=args.backend,
             )
 
 

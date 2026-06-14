@@ -9,8 +9,12 @@ try:
 except ImportError:
     f_attencion_v2_cuda = None
 
+try:
+    import f_attencion_v2_official_cuda
+except ImportError:
+    f_attencion_v2_official_cuda = None
 
-_BACKENDS = {"auto", "native", "sdpa"}
+_BACKENDS = {"auto", "native", "native_fast", "official", "sdpa"}
 
 
 def _check_inputs(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> None:
@@ -53,6 +57,84 @@ def _sdpa(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: bool, scale
             return F.scaled_dot_product_attention(q, k, v, is_causal=causal)
         default_scale = 1.0 / math.sqrt(q.shape[-1])
         return F.scaled_dot_product_attention(q * (scale_value / default_scale), k, v, is_causal=causal)
+
+
+class _OfficialLocalFlashAttentionFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, q, k, v, causal: bool = True, scale=None):
+        _check_common_inputs(q, k, v)
+        if f_attencion_v2_official_cuda is None:
+            raise RuntimeError(
+                "f_attencion_v2_official_cuda no esta compilado. "
+                "Recompila con `python setup.py build_ext --inplace`."
+            )
+        if q.dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError("native_fast soporta float16 y bfloat16.")
+
+        scale_value = float(scale) if scale is not None else 1.0 / math.sqrt(q.shape[-1])
+        q_bnhd = q.transpose(1, 2).contiguous()
+        k_bnhd = k.transpose(1, 2).contiguous()
+        v_bnhd = v.transpose(1, 2).contiguous()
+        out, softmax_lse, _, rng_state = f_attencion_v2_official_cuda.fwd(
+            q_bnhd,
+            k_bnhd,
+            v_bnhd,
+            None,
+            None,
+            0.0,
+            scale_value,
+            causal,
+            -1,
+            0 if causal else -1,
+            0.0,
+            False,
+            None,
+        )
+        ctx.save_for_backward(q_bnhd, k_bnhd, v_bnhd, out, softmax_lse, rng_state)
+        ctx.causal = causal
+        ctx.scale = scale_value
+        return out.transpose(1, 2).contiguous()
+
+    @staticmethod
+    def backward(ctx, dout):
+        q, k, v, out, softmax_lse, rng_state = ctx.saved_tensors
+        dout = dout.transpose(1, 2).contiguous()
+        dq = torch.empty_like(q)
+        dk = torch.empty_like(k)
+        dv = torch.empty_like(v)
+        f_attencion_v2_official_cuda.bwd(
+            dout,
+            q,
+            k,
+            v,
+            out,
+            softmax_lse,
+            dq,
+            dk,
+            dv,
+            None,
+            0.0,
+            ctx.scale,
+            ctx.causal,
+            -1,
+            0 if ctx.causal else -1,
+            0.0,
+            False,
+            None,
+            rng_state,
+        )
+        return (
+            dq.transpose(1, 2).contiguous(),
+            dk.transpose(1, 2).contiguous(),
+            dv.transpose(1, 2).contiguous(),
+            None,
+            None,
+        )
+
+
+def _official_flash_attn(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: bool, scale):
+    _check_common_inputs(q, k, v)
+    return _OfficialLocalFlashAttentionFunction.apply(q, k, v, causal, scale)
 
 
 def _can_use_native(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> bool:
@@ -119,6 +201,8 @@ def flash_attention_v2_backend(
     backends:
         auto: usa SDPA de PyTorch; puede activar kernels flash cuando el GPU lo permite.
         native: fuerza el kernel CUDA de este proyecto.
+        native_fast: usa una copia local de los kernels oficiales de FlashAttention-2.
+        official: alias de native_fast.
         sdpa: usa torch.scaled_dot_product_attention, que puede activar kernels flash.
     """
     if backend not in _BACKENDS:
@@ -128,6 +212,9 @@ def flash_attention_v2_backend(
     if backend == "sdpa":
         _check_common_inputs(q, k, v)
         return _sdpa(q, k, v, causal=causal, scale=scale)
+
+    if backend in ("native_fast", "official"):
+        return _official_flash_attn(q, k, v, causal=causal, scale=scale)
 
     if backend == "native":
         if f_attencion_v2_cuda is None:

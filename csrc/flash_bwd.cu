@@ -30,7 +30,7 @@ __host__ inline BwdTileConfig choose_bwd_tile(int N, int D) {
 }
 
 template <typename scalar_t, int BLOCK_M, int BLOCK_N_TILE>
-__global__ void flash_bwd_kernel_tiled(
+__global__ void flash_bwd_dq_kernel_tiled(
     const scalar_t* __restrict__ dout,
     const scalar_t* __restrict__ q,
     const scalar_t* __restrict__ k,
@@ -39,8 +39,7 @@ __global__ void flash_bwd_kernel_tiled(
     const float* __restrict__ m,
     const float* __restrict__ l,
     scalar_t* __restrict__ dq,
-    scalar_t* __restrict__ dk,
-    scalar_t* __restrict__ dv,
+    float* __restrict__ delta_out,
     int B,
     int H,
     int N,
@@ -60,7 +59,7 @@ __global__ void flash_bwd_kernel_tiled(
     __shared__ float probs[BLOCK_M][BLOCK_N_TILE];
     __shared__ float dscores[BLOCK_M][BLOCK_N_TILE];
     __shared__ float dq_acc[BLOCK_M][MAX_HEAD_DIM];
-    __shared__ float delta[BLOCK_M];
+    __shared__ float delta_shared[BLOCK_M];
 
     const int row_base = offset4(batch, head, row, 0, H, N, D);
     const int stats_index = (batch * H + head) * N + row;
@@ -79,7 +78,10 @@ __global__ void flash_bwd_kernel_tiled(
             delta_partial += __shfl_down_sync(0xffffffff, delta_partial, offset);
         }
         if (lane == 0) {
-            delta[warp_id] = delta_partial;
+            delta_shared[warp_id] = delta_partial;
+            if (row_valid) {
+                delta_out[stats_index] = delta_partial;
+            }
         }
     }
     __syncwarp();
@@ -130,7 +132,7 @@ __global__ void flash_bwd_kernel_tiled(
                     dp += __shfl_down_sync(0xffffffff, dp, offset);
                 }
                 if (lane == 0) {
-                    dscores[warp_id][j] = probs[warp_id][j] * (dp - delta[warp_id]) * scale;
+                    dscores[warp_id][j] = probs[warp_id][j] * (dp - delta_shared[warp_id]) * scale;
                 }
             }
         }
@@ -148,20 +150,6 @@ __global__ void flash_bwd_kernel_tiled(
             }
         }
 
-        if (row_valid) {
-            for (int index = lane; index < tile_count * D; index += WARP_SIZE) {
-                const int j = index / D;
-                const int d = index % D;
-                const int col_j = col_start + j;
-                if (!causal || col_j <= row) {
-                    const int kv_index = offset4(batch, head, col_j, d, H, N, D);
-                    const float q_val = to_float(q[row_base + d]);
-                    const float do_val = to_float(dout[row_base + d]);
-                    atomic_add_value(&dk[kv_index], dscores[warp_id][j] * q_val);
-                    atomic_add_value(&dv[kv_index], probs[warp_id][j] * do_val);
-                }
-            }
-        }
         __syncwarp();
     }
 
@@ -169,6 +157,90 @@ __global__ void flash_bwd_kernel_tiled(
         for (int d = lane; d < D; d += WARP_SIZE) {
             dq[row_base + d] = from_float<scalar_t>(dq_acc[warp_id][d]);
         }
+    }
+}
+
+template <typename scalar_t>
+__global__ void flash_bwd_kv_kernel(
+    const scalar_t* __restrict__ dout,
+    const scalar_t* __restrict__ q,
+    const scalar_t* __restrict__ k,
+    const scalar_t* __restrict__ v,
+    const float* __restrict__ m,
+    const float* __restrict__ l,
+    const float* __restrict__ delta,
+    scalar_t* __restrict__ dk,
+    scalar_t* __restrict__ dv,
+    int B,
+    int H,
+    int N,
+    int D,
+    bool causal,
+    float scale) {
+    const int col = blockIdx.x;
+    const int head = blockIdx.y;
+    const int batch = blockIdx.z;
+    const int tid = threadIdx.x;
+    const int warp_id = tid / WARP_SIZE;
+    const int lane = tid % WARP_SIZE;
+
+    __shared__ float warp_score[WARPS_PER_BLOCK];
+    __shared__ float warp_dp[WARPS_PER_BLOCK];
+    __shared__ float ds_shared;
+    __shared__ float p_shared;
+
+    float dk_acc = 0.0f;
+    float dv_acc = 0.0f;
+    const int start_row = causal ? col : 0;
+
+    for (int row = start_row; row < N; ++row) {
+        const int row_base = offset4(batch, head, row, 0, H, N, D);
+        const int k_base = offset4(batch, head, col, 0, H, N, D);
+        const int stats_index = (batch * H + head) * N + row;
+
+        float score_value = 0.0f;
+        float dp_value = 0.0f;
+        if (tid < D) {
+            score_value = to_float(q[row_base + tid]) * to_float(k[k_base + tid]);
+            dp_value = to_float(dout[row_base + tid]) * to_float(v[k_base + tid]);
+        }
+
+        for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+            score_value += __shfl_down_sync(0xffffffff, score_value, offset);
+            dp_value += __shfl_down_sync(0xffffffff, dp_value, offset);
+        }
+
+        if (lane == 0) {
+            warp_score[warp_id] = score_value;
+            warp_dp[warp_id] = dp_value;
+        }
+        __syncthreads();
+
+        if (tid == 0) {
+            float score_sum = 0.0f;
+            float dp_sum = 0.0f;
+            for (int warp = 0; warp < WARPS_PER_BLOCK; ++warp) {
+                score_sum += warp_score[warp];
+                dp_sum += warp_dp[warp];
+            }
+            const float score = score_sum * scale;
+            const float p = expf(score - m[stats_index]) / l[stats_index];
+            p_shared = p;
+            ds_shared = p * (dp_sum - delta[stats_index]) * scale;
+        }
+        __syncthreads();
+
+        if (tid < D) {
+            dk_acc += ds_shared * to_float(q[row_base + tid]);
+            dv_acc += p_shared * to_float(dout[row_base + tid]);
+        }
+        __syncthreads();
+    }
+
+    if (tid < D) {
+        const int kv_index = offset4(batch, head, col, tid, H, N, D);
+        dk[kv_index] = from_float<scalar_t>(dk_acc);
+        dv[kv_index] = from_float<scalar_t>(dv_acc);
     }
 }
 
@@ -185,6 +257,8 @@ std::vector<torch::Tensor> flash_bwd(
     auto dq = torch::empty_like(q);
     auto dk = torch::empty_like(k);
     auto dv = torch::empty_like(v);
+    auto stats_options = q.options().dtype(torch::kFloat32);
+    auto delta = torch::empty({q.size(0), q.size(1), q.size(2)}, stats_options);
 
     const int B = q.size(0);
     const int H = q.size(1);
@@ -193,15 +267,13 @@ std::vector<torch::Tensor> flash_bwd(
     const BwdTileConfig tile = choose_bwd_tile(N, D);
 
     dim3 grid((N + tile.block_m - 1) / tile.block_m, H, B);
+    dim3 kv_grid(N, H, B);
     dim3 block(THREADS);
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-    C10_CUDA_CHECK(cudaMemsetAsync(dk.data_ptr(), 0, dk.numel() * dk.element_size(), stream));
-    C10_CUDA_CHECK(cudaMemsetAsync(dv.data_ptr(), 0, dv.numel() * dv.element_size(), stream));
-
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(q.scalar_type(), "flash_bwd_kernel", [&] {
         if (tile.block_n == 128) {
-            flash_bwd_kernel_tiled<scalar_t, ROWS_PER_BLOCK, 128><<<grid, block, 0, stream>>>(
+            flash_bwd_dq_kernel_tiled<scalar_t, ROWS_PER_BLOCK, 128><<<grid, block, 0, stream>>>(
                 dout.data_ptr<scalar_t>(),
                 q.data_ptr<scalar_t>(),
                 k.data_ptr<scalar_t>(),
@@ -210,8 +282,7 @@ std::vector<torch::Tensor> flash_bwd(
                 m.data_ptr<float>(),
                 l.data_ptr<float>(),
                 dq.data_ptr<scalar_t>(),
-                dk.data_ptr<scalar_t>(),
-                dv.data_ptr<scalar_t>(),
+                delta.data_ptr<float>(),
                 B,
                 H,
                 N,
@@ -219,7 +290,7 @@ std::vector<torch::Tensor> flash_bwd(
                 causal,
                 static_cast<float>(scale));
         } else {
-            flash_bwd_kernel_tiled<scalar_t, ROWS_PER_BLOCK, 64><<<grid, block, 0, stream>>>(
+            flash_bwd_dq_kernel_tiled<scalar_t, ROWS_PER_BLOCK, 64><<<grid, block, 0, stream>>>(
                 dout.data_ptr<scalar_t>(),
                 q.data_ptr<scalar_t>(),
                 k.data_ptr<scalar_t>(),
@@ -228,8 +299,7 @@ std::vector<torch::Tensor> flash_bwd(
                 m.data_ptr<float>(),
                 l.data_ptr<float>(),
                 dq.data_ptr<scalar_t>(),
-                dk.data_ptr<scalar_t>(),
-                dv.data_ptr<scalar_t>(),
+                delta.data_ptr<float>(),
                 B,
                 H,
                 N,
@@ -237,6 +307,23 @@ std::vector<torch::Tensor> flash_bwd(
                 causal,
                 static_cast<float>(scale));
         }
+
+        flash_bwd_kv_kernel<scalar_t><<<kv_grid, block, 0, stream>>>(
+            dout.data_ptr<scalar_t>(),
+            q.data_ptr<scalar_t>(),
+            k.data_ptr<scalar_t>(),
+            v.data_ptr<scalar_t>(),
+            m.data_ptr<float>(),
+            l.data_ptr<float>(),
+            delta.data_ptr<float>(),
+            dk.data_ptr<scalar_t>(),
+            dv.data_ptr<scalar_t>(),
+            B,
+            H,
+            N,
+            D,
+            causal,
+            static_cast<float>(scale));
     });
 
     C10_CUDA_KERNEL_LAUNCH_CHECK();

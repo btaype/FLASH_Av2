@@ -346,6 +346,12 @@ def run_with_oom(label: str, fn: Callable[[], tuple[float, float, float]]) -> tu
         return "error", None, f"{label}: {str(exc).splitlines()[0]}"
 
 
+def cleanup_cuda(block: SyntheticTransformerBlock, x: torch.Tensor) -> None:
+    reset_grads(block, x)
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
 def print_leaderboard(rows: list[dict[str, object]]) -> None:
     ok_rows = [row for row in rows if row["status"] == "ok"]
     if not ok_rows:
@@ -441,9 +447,15 @@ def main():
             runner = FWD_RUNNERS[mode]
 
             def fwd_call(runner=runner):
-                return measure_once(lambda: runner(block, x, args.microbatch), args.warmup, args.iters)
+                def run_fwd():
+                    with torch.no_grad():
+                        return runner(block, x, args.microbatch)
 
+                return measure_once(run_fwd, args.warmup, args.iters)
+
+            print(f"[fwd] probando {mode} ...", flush=True)
             status, result, error = run_with_oom(mode, fwd_call)
+            cleanup_cuda(block, x)
             if result is None:
                 add_result(rows, status=status, measure="fwd", mode=mode, args=args, total_flops=fwd_flops, error=error)
                 print(f"{mode:30s} {status} | {error}")
@@ -475,7 +487,9 @@ def main():
 
                 return measure_once(run_train, args.warmup, args.iters)
 
+            print(f"[fwd_bwd_accum] probando {mode} ...", flush=True)
             status, result, error = run_with_oom(mode, train_call)
+            cleanup_cuda(block, x)
             if result is None:
                 add_result(
                     rows,

@@ -1,0 +1,60 @@
+(/home/juanpa/Documents/newCompile/envF/.venv) juanpa@DESKTOP-6S7M6V2:~/Documents/newCompile/FLASH_Av2$ PYTHONPATH=$PWD python tests/benchmark_interleaved_block.py --backend native_fast --mode all --measure fwd_bwd_accum --batch 4 --microbatch 1 --seqlen 1024 --hidden-dim 1024 --heads 16 --head-dim 64 --dtype float16 --warmup 10 --iters 50 --accum-window 1 --no-verify
+GPU: NVIDIA GeForce RTX 4060 Ti
+backend: native_fast
+measure: fwd_bwd_accum
+batch=4 microbatch=1 seqlen=1024
+hidden_dim=1024 heads=16 head_dim=64
+accum_window=1
+full                 17.5073 ms | 233959.2 tok/s | 25.02 TFLOPs/s | speedup_vs_full 1.000x | speedup_vs_micro_serial 1.000x | peak_mem 368.5 MiB
+micro_serial         16.1861 ms | 253056.9 tok/s | 27.07 TFLOPs/s | speedup_vs_full 1.082x | speedup_vs_micro_serial 1.000x | peak_mem 166.3 MiB
+interleaved          16.7813 ms | 244080.7 tok/s | 26.11 TFLOPs/s | speedup_vs_full 1.043x | speedup_vs_micro_serial 0.965x | peak_mem 200.8 MiB
+interleaved_prealloc 16.8522 ms | 243053.7 tok/s | 26.00 TFLOPs/s | speedup_vs_full 1.039x | speedup_vs_micro_serial 0.960x | peak_mem 200.8 MiB
+CSV guardado: interleaved_benchmark_results/interleaved_block_results.csv
+(/home/juanpa/Documents/newCompile/envF/.venv) juanpa@DESKTOP-6S7M6V2:~/Documents/newCompile/FLASH_Av2$ PYTHONPATH=$PWD python tests/benchmark_interleaved_block.py --backend native_fast --mode all --measure fwd_bwd_accum --batch 4 --microbatch 1 --seqlen 2048 --hidden-dim 1024 --heads 16 --head-dim 64 --dtype float16 --warmup 10 --iters 50 --accum-window 1 --no-verify
+GPU: NVIDIA GeForce RTX 4060 Ti
+backend: native_fast
+measure: fwd_bwd_accum
+batch=4 microbatch=1 seqlen=2048
+hidden_dim=1024 heads=16 head_dim=64
+accum_window=1
+full                 39.7239 ms | 206223.3 tok/s | 23.35 TFLOPs/s | speedup_vs_full 1.000x | speedup_vs_micro_serial 1.000x | peak_mem 688.8 MiB
+micro_serial         33.5648 ms | 244065.1 tok/s | 27.64 TFLOPs/s | speedup_vs_full 1.183x | speedup_vs_micro_serial 1.000x | peak_mem 252.4 MiB
+interleaved          34.3289 ms | 238632.4 tok/s | 27.02 TFLOPs/s | speedup_vs_full 1.157x | speedup_vs_micro_serial 0.978x | peak_mem 288.9 MiB
+interleaved_prealloc 34.3099 ms | 238765.1 tok/s | 27.04 TFLOPs/s | speedup_vs_full 1.158x | speedup_vs_micro_serial 0.978x | peak_mem 288.9 MiB
+CSV guardado: interleaved_benchmark_results/interleaved_block_results.csv
+(/home/juanpa/Documents/newCompile/envF/.venv) juanpa@DESKTOP-6S7M6V2:~/Documents/newCompile/FLASH_Av2$ PYTHONPATH=$PWD python tests/benchmark_interleaved_block.py --backend native_fast --mode all --measure fwd_bwd_accum --batch 4 --microbatch 1 --seqlen 1024 --hidden-dim 1024 --heads 8 --head-dim 128 --dtype float16 --warmup 10 --iters 50 --accum-window 1 --no-verify
+GPU: NVIDIA GeForce RTX 4060 Ti
+backend: native_fast
+measure: fwd_bwd_accum
+batch=4 microbatch=1 seqlen=1024
+hidden_dim=1024 heads=8 head_dim=128
+accum_window=1
+full                 17.6495 ms | 232074.8 tok/s | 24.82 TFLOPs/s | speedup_vs_full 1.000x | speedup_vs_micro_serial 1.000x | peak_mem 368.4 MiB
+micro_serial         16.0566 ms | 255098.1 tok/s | 27.28 TFLOPs/s | speedup_vs_full 1.099x | speedup_vs_micro_serial 1.000x | peak_mem 166.3 MiB
+interleaved          16.7815 ms | 244077.7 tok/s | 26.11 TFLOPs/s | speedup_vs_full 1.052x | speedup_vs_micro_serial 0.957x | peak_mem 200.8 MiB
+interleaved_prealloc 16.9547 ms | 241584.7 tok/s | 25.84 TFLOPs/s | speedup_vs_full 1.041x | speedup_vs_micro_serial 0.947x | peak_mem 200.8 MiB
+CSV guardado: interleaved_benchmark_results/interleaved_block_results.csv
+(/home/juanpa/Documents/newCompile/envF/.venv) juanpa@DESKTOP-6S7M6V2:~/Documents/newCompile/FLASH_Av2$ PYTHONPATH=$PWD python tests/benchmark_interleaved_block.py --backend native_fast --mode all --measure fwd_bwd_accum --batch 16 --microbatch 2 --seqlen 16384 --hidden-dim 1024 --heads 8 --head-dim 128 --dtype float16 --warmup 1 --iters 3 --accum-window 1 --no-verify
+GPU: NVIDIA GeForce RTX 4060 Ti
+backend: native_fast
+measure: fwd_bwd_accum
+batch=16 microbatch=2 seqlen=16384
+hidden_dim=1024 heads=8 head_dim=128
+accum_window=1
+full                 OOM | CUDA out of memory. Tried to allocate 2.00 GiB. GPU 0 has a total capacity of 8.00 GiB of which 0 bytes is free. Including non-PyTorch memory, this process has 17179869184.00 GiB memory in use. Of the allocated memory 12.55 GiB is allocated by PyTorch, and 506.87 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+micro_serial         1879.6965 ms | 139460.8 tok/s | 28.08 TFLOPs/s | speedup_vs_full 1.000x | speedup_vs_micro_serial 1.000x | peak_mem 3089.4 MiB
+interleaved          9054.4876 ms | 28951.8 tok/s | 5.83 TFLOPs/s | speedup_vs_full 1.000x | speedup_vs_micro_serial 0.208x | peak_mem 3185.9 MiB
+interleaved_prealloc 9920.6458 ms | 26424.1 tok/s | 5.32 TFLOPs/s | speedup_vs_full 1.000x | speedup_vs_micro_serial 0.189x | peak_mem 3185.9 MiB
+CSV guardado: interleaved_benchmark_results/interleaved_block_results.csv
+(/home/juanpa/Documents/newCompile/envF/.venv) juanpa@DESKTOP-6S7M6V2:~/Documents/newCompile/FLASH_Av2$ PYTHONPATH=$PWD python tests/benchmark_interleaved_block.py --backend native_fast --mode all --measure fwd_bwd_accum --batch 16 --microbatch 2 --seqlen 16384 --hidden-dim 1024 --heads 8 --head-dim 128 --dtype float16 --warmup 1 --iters 3 --accum-window 1 --no-verify
+GPU: NVIDIA GeForce RTX 4060 Ti
+backend: native_fast
+measure: fwd_bwd_accum
+batch=16 microbatch=2 seqlen=16384
+hidden_dim=1024 heads=8 head_dim=128
+accum_window=1
+full                 OOM | CUDA out of memory. Tried to allocate 2.00 GiB. GPU 0 has a total capacity of 8.00 GiB of which 0 bytes is free. Including non-PyTorch memory, this process has 17179869184.00 GiB memory in use. Of the allocated memory 12.55 GiB is allocated by PyTorch, and 506.87 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+micro_serial         1883.0003 ms | 139216.1 tok/s | 28.03 TFLOPs/s | speedup_vs_full 1.000x | speedup_vs_micro_serial 1.000x | peak_mem 3089.4 MiB
+interleaved          8934.4310 ms | 29340.9 tok/s | 5.91 TFLOPs/s | speedup_vs_full 1.000x | speedup_vs_micro_serial 0.211x | peak_mem 3185.9 MiB
+interleaved_prealloc 9059.4180 ms | 28936.1 tok/s | 5.83 TFLOPs/s | speedup_vs_full 1.000x | speedup_vs_micro_serial 0.208x | peak_mem 3185.9 MiB
+CSV guardado: interleaved_benchmark_results/interleaved_block_results.csv

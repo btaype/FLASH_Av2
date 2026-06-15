@@ -1,0 +1,81 @@
+(/home/juanpa/Documents/newCompile/envF/.venv) juanpa@DESKTOP-6S7M6V2:~/Documents/newCompile/FLASH_Av2$ PYTHONPATH=$PWD python tests/benchmark_interleaved_max.py --backend native_fast --measure fwd_bwd_accum --batch 16 --microbatch 2 --seqlen 16384 --hidden-dim 1024 --heads 8 --head-dim 128 --dtype float16 --warmup 1 --iters 3 --accum-window 1 --train-modes micro_window,stage_split_serial,stage_split_interleaved,stage_split_interleaved_attn_high,stage_split_interleaved_mlp_high
+GPU: NVIDIA GeForce RTX 4060 Ti
+backend: native_fast
+batch=16 microbatch=2 seqlen=16384
+hidden_dim=1024 heads=8 head_dim=128
+accum_window=1
+[fwd_bwd_accum] probando micro_window ...
+micro_window                   1879.1639 ms | 28.09 TFLOPs/s | peak 3089.4 MiB
+[fwd_bwd_accum] probando stage_split_serial ...
+stage_split_serial             1878.6994 ms | 28.09 TFLOPs/s | peak 3089.4 MiB
+[fwd_bwd_accum] probando stage_split_interleaved ...
+stage_split_interleaved        1875.8677 ms | 28.13 TFLOPs/s | peak 3634.9 MiB
+[fwd_bwd_accum] probando stage_split_interleaved_attn_high ...
+stage_split_interleaved_attn_high 1877.1652 ms | 28.12 TFLOPs/s | peak 3667.4 MiB
+[fwd_bwd_accum] probando stage_split_interleaved_mlp_high ...
+stage_split_interleaved_mlp_high 2341.3088 ms | 22.54 TFLOPs/s | peak 3699.9 MiB
+
+CSV guardado: interleaved_benchmark_results/max/interleaved_max_results.csv
+
+=== leaderboard ===
+
+fwd_bwd_accum
+stage_split_interleaved         1875.8677 ms |   28.13 TFLOPs/s | peak   3634.9 MiB
+stage_split_interleaved_attn_high  1877.1652 ms |   28.12 TFLOPs/s | peak   3667.4 MiB
+stage_split_serial              1878.6994 ms |   28.09 TFLOPs/s | peak   3089.4 MiB
+micro_window                    1879.1639 ms |   28.09 TFLOPs/s | peak   3089.4 MiB
+stage_split_interleaved_mlp_high  2341.3088 ms |   22.54 TFLOPs/s | peak   3699.9 MiB
+(/home/juanpa/Documents/newCompile/envF/.venv) juanpa@DESKTOP-6S7M6V2:~/Documents/newCompile/FLASH_Av2$ PYTHONPATH=$PWD python tests/benchmark_interleaved_max.py --backend native_fast --measure fwd_bwd_accum --batch 8 --microbatch 2 --seqlen 8192 --hidden-dim 1024 --heads 8 --head-dim 128 --dtype float16 --warmup 3 --iters 10 --accum-window 1 --train-modes micro_window,stage_split_serial,stage_split_interleaved,stage_split_interleaved_attn_high,stage_split_interleaved_mlp_high
+GPU: NVIDIA GeForce RTX 4060 Ti
+backend: native_fast
+batch=8 microbatch=2 seqlen=8192
+hidden_dim=1024 heads=8 head_dim=128
+accum_window=1
+[fwd_bwd_accum] probando micro_window ...
+micro_window                   385.9415 ms | 25.64 TFLOPs/s | peak 1456.8 MiB
+[fwd_bwd_accum] probando stage_split_serial ...
+stage_split_serial             386.7438 ms | 25.59 TFLOPs/s | peak 1456.8 MiB
+[fwd_bwd_accum] probando stage_split_interleaved ...
+stage_split_interleaved        384.7024 ms | 25.72 TFLOPs/s | peak 1745.8 MiB
+[fwd_bwd_accum] probando stage_split_interleaved_attn_high ...
+stage_split_interleaved_attn_high 384.8175 ms | 25.72 TFLOPs/s | peak 1778.3 MiB
+[fwd_bwd_accum] probando stage_split_interleaved_mlp_high ...
+stage_split_interleaved_mlp_high 382.6251 ms | 25.86 TFLOPs/s | peak 1810.8 MiB
+
+CSV guardado: interleaved_benchmark_results/max/interleaved_max_results.csv
+
+=== leaderboard ===
+
+fwd_bwd_accum
+stage_split_interleaved_mlp_high   382.6251 ms |   25.86 TFLOPs/s | peak   1810.8 MiB
+stage_split_interleaved          384.7024 ms |   25.72 TFLOPs/s | peak   1745.8 MiB
+stage_split_interleaved_attn_high   384.8175 ms |   25.72 TFLOPs/s | peak   1778.3 MiB
+micro_window                     385.9415 ms |   25.64 TFLOPs/s | peak   1456.8 MiB
+stage_split_serial               386.7438 ms |   25.59 TFLOPs/s | peak   1456.8 MiB
+(/home/juanpa/Documents/newCompile/envF/.venv) juanpa@DESKTOP-6S7M6V2:~/Documents/newCompile/FLASH_Av2$ PYTHONPATH=$PWD python tests/benchmark_interleaved_max.py --backend native_fast --measure fwd_bwd_accum --batch 8 --microbatch 2 --seqlen 4096 --hidden-dim 1024 --heads 8 --head-dim 128 --dtype float16 --warmup 5 --iters 20 --accum-window 1 --train-modes micro_window,stage_split_serial,stage_split_interleaved,stage_split_interleaved_attn_high,stage_split_interleaved_mlp_high
+GPU: NVIDIA GeForce RTX 4060 Ti
+backend: native_fast
+batch=8 microbatch=2 seqlen=4096
+hidden_dim=1024 heads=8 head_dim=128
+accum_window=1
+[fwd_bwd_accum] probando micro_window ...
+micro_window                   169.9998 ms | 24.25 TFLOPs/s | peak 768.5 MiB
+[fwd_bwd_accum] probando stage_split_serial ...
+stage_split_serial             170.4403 ms | 24.19 TFLOPs/s | peak 768.5 MiB
+[fwd_bwd_accum] probando stage_split_interleaved ...
+stage_split_interleaved        170.4922 ms | 24.18 TFLOPs/s | peak 929.3 MiB
+[fwd_bwd_accum] probando stage_split_interleaved_attn_high ...
+stage_split_interleaved_attn_high 170.1567 ms | 24.23 TFLOPs/s | peak 961.8 MiB
+[fwd_bwd_accum] probando stage_split_interleaved_mlp_high ...
+stage_split_interleaved_mlp_high 168.7889 ms | 24.43 TFLOPs/s | peak 994.3 MiB
+
+CSV guardado: interleaved_benchmark_results/max/interleaved_max_results.csv
+
+=== leaderboard ===
+
+fwd_bwd_accum
+stage_split_interleaved_mlp_high   168.7889 ms |   24.43 TFLOPs/s | peak    994.3 MiB
+micro_window                     169.9998 ms |   24.25 TFLOPs/s | peak    768.5 MiB
+stage_split_interleaved_attn_high   170.1567 ms |   24.23 TFLOPs/s | peak    961.8 MiB
+stage_split_serial               170.4403 ms |   24.19 TFLOPs/s | peak    768.5 MiB
+stage_split_interleaved          170.4922 ms |   24.18 TFLOPs/s | peak    929.3 MiB

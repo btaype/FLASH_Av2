@@ -228,11 +228,15 @@ def train_micro_accum(
     microbatch: int,
     accum_window: int,
 ) -> None:
-    del accum_window
+    if accum_window < 1:
+        raise ValueError("accum_window debe ser >= 1.")
     chunks = split_microbatches(x, microbatch)
-    loss_scale = 1.0 / len(chunks)
-    for chunk in chunks:
-        out = block(chunk)
+    num_chunks = len(chunks)
+    for start in range(0, num_chunks, accum_window):
+        window_chunks = chunks[start : start + accum_window]
+        window_x = window_chunks[0] if len(window_chunks) == 1 else torch.cat(window_chunks, dim=0)
+        out = block(window_x)
+        loss_scale = len(window_chunks) / num_chunks
         loss = out.float().square().mean() * loss_scale
         loss.backward()
 

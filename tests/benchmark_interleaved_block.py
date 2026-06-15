@@ -98,25 +98,33 @@ def run_micro_serial(block: SyntheticTransformerBlock, x: torch.Tensor, microbat
     return torch.cat(outputs, dim=0)
 
 
-_INTERLEAVED_STREAMS: dict[tuple[int, int], tuple[torch.cuda.Stream, torch.cuda.Stream]] = {}
+_INTERLEAVED_STATE: dict[
+    tuple[int, int],
+    tuple[torch.cuda.Stream, torch.cuda.Stream, list[torch.cuda.Event], list[torch.cuda.Event]],
+] = {}
 
 
-def get_interleaved_streams(num_chunks: int) -> tuple[torch.cuda.Stream, torch.cuda.Stream]:
+def get_interleaved_state(
+    num_chunks: int,
+) -> tuple[torch.cuda.Stream, torch.cuda.Stream, list[torch.cuda.Event], list[torch.cuda.Event]]:
     device = torch.cuda.current_device()
     key = (device, num_chunks)
-    streams = _INTERLEAVED_STREAMS.get(key)
-    if streams is None:
-        streams = (torch.cuda.Stream(device=device), torch.cuda.Stream(device=device))
-        _INTERLEAVED_STREAMS[key] = streams
-    return streams
+    state = _INTERLEAVED_STATE.get(key)
+    if state is None:
+        state = (
+            torch.cuda.Stream(device=device),
+            torch.cuda.Stream(device=device),
+            [torch.cuda.Event() for _ in range(num_chunks)],
+            [torch.cuda.Event() for _ in range(num_chunks)],
+        )
+        _INTERLEAVED_STATE[key] = state
+    return state
 
 
 def run_interleaved(block: SyntheticTransformerBlock, x: torch.Tensor, microbatch: int) -> torch.Tensor:
     chunks = split_microbatches(x, microbatch)
     current_stream = torch.cuda.current_stream()
-    attn_stream, mlp_stream = get_interleaved_streams(len(chunks))
-    attn_done = [torch.cuda.Event() for _ in chunks]
-    mlp_done = [torch.cuda.Event() for _ in chunks]
+    attn_stream, mlp_stream, attn_done, mlp_done = get_interleaved_state(len(chunks))
     attn_outputs: list[torch.Tensor | None] = [None] * len(chunks)
     outputs: list[torch.Tensor | None] = [None] * len(chunks)
 
@@ -151,10 +159,53 @@ def run_interleaved(block: SyntheticTransformerBlock, x: torch.Tensor, microbatc
     return torch.cat([out for out in outputs if out is not None], dim=0)
 
 
+def run_interleaved_prealloc(block: SyntheticTransformerBlock, x: torch.Tensor, microbatch: int) -> torch.Tensor:
+    if torch.is_grad_enabled():
+        return run_interleaved(block, x, microbatch)
+
+    chunks = split_microbatches(x, microbatch)
+    current_stream = torch.cuda.current_stream()
+    attn_stream, mlp_stream, attn_done, mlp_done = get_interleaved_state(len(chunks))
+    attn_outputs: list[torch.Tensor | None] = [None] * len(chunks)
+    output = torch.empty_like(x)
+
+    for idx, chunk in enumerate(chunks):
+        with torch.cuda.stream(attn_stream):
+            chunk.record_stream(attn_stream)
+            attn_outputs[idx] = block.attention_stage(chunk)
+            attn_done[idx].record(attn_stream)
+
+        if idx > 0:
+            prev = idx - 1
+            start = prev * microbatch
+            end = start + microbatch
+            with torch.cuda.stream(mlp_stream):
+                mlp_stream.wait_event(attn_done[prev])
+                assert attn_outputs[prev] is not None
+                mlp_out = block.mlp_stage(attn_outputs[prev])
+                output[start:end].copy_(mlp_out)
+                mlp_done[prev].record(mlp_stream)
+
+    last = len(chunks) - 1
+    start = last * microbatch
+    end = start + microbatch
+    with torch.cuda.stream(mlp_stream):
+        mlp_stream.wait_event(attn_done[last])
+        assert attn_outputs[last] is not None
+        mlp_out = block.mlp_stage(attn_outputs[last])
+        output[start:end].copy_(mlp_out)
+        mlp_done[last].record(mlp_stream)
+
+    for event in mlp_done:
+        current_stream.wait_event(event)
+    return output
+
+
 RUNNERS = {
     "full": run_full_batch,
     "micro_serial": run_micro_serial,
     "interleaved": run_interleaved,
+    "interleaved_prealloc": run_interleaved_prealloc,
 }
 
 
@@ -194,7 +245,7 @@ def reset_grads(block: nn.Module, x: torch.Tensor) -> None:
         x.grad = None
 
 
-def measure_runner(block, x, runner, microbatch, measure, warmup, iters) -> float:
+def measure_runner(block, x, runner, microbatch, measure, warmup, iters) -> tuple[float, float, float]:
     def run_once():
         if measure == "fwd":
             with torch.no_grad():
@@ -208,6 +259,7 @@ def measure_runner(block, x, runner, microbatch, measure, warmup, iters) -> floa
     for _ in range(warmup):
         run_once()
     torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
 
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
@@ -216,7 +268,10 @@ def measure_runner(block, x, runner, microbatch, measure, warmup, iters) -> floa
         run_once()
     end.record()
     torch.cuda.synchronize()
-    return start.elapsed_time(end) / iters
+    ms = start.elapsed_time(end) / iters
+    peak_alloc_mb = torch.cuda.max_memory_allocated() / 1024**2
+    peak_reserved_mb = torch.cuda.max_memory_reserved() / 1024**2
+    return ms, peak_alloc_mb, peak_reserved_mb
 
 
 @torch.no_grad()
@@ -225,7 +280,7 @@ def verify_outputs(block, x, microbatch) -> dict[str, float]:
     full = run_full_batch(block, x, microbatch)
     torch.cuda.synchronize()
     errors = {}
-    for mode in ("micro_serial", "interleaved"):
+    for mode in ("micro_serial", "interleaved", "interleaved_prealloc"):
         out = RUNNERS[mode](block, x, microbatch)
         torch.cuda.synchronize()
         diff = (out - full).abs()
@@ -239,7 +294,11 @@ def parse_args():
         description="Benchmark de scheduling intercalado Attention/MLP por microbatches."
     )
     parser.add_argument("--backend", choices=["native", "native_fast", "official", "sdpa", "auto"], default="native_fast")
-    parser.add_argument("--mode", choices=["full", "micro_serial", "interleaved", "all"], default="all")
+    parser.add_argument(
+        "--mode",
+        choices=["full", "micro_serial", "interleaved", "interleaved_prealloc", "all"],
+        default="all",
+    )
     parser.add_argument("--measure", choices=["fwd", "fwd_bwd"], default="fwd")
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--microbatch", type=int, default=2)
@@ -295,7 +354,8 @@ def main():
         print(
             "verify "
             f"micro_serial max={errors['micro_serial_max_error']:.4e} "
-            f"interleaved max={errors['interleaved_max_error']:.4e}"
+            f"interleaved max={errors['interleaved_max_error']:.4e} "
+            f"interleaved_prealloc max={errors['interleaved_prealloc_max_error']:.4e}"
         )
 
     modes = list(RUNNERS) if args.mode == "all" else [args.mode]
@@ -309,7 +369,9 @@ def main():
     for mode in modes:
         torch.cuda.empty_cache()
         runner = RUNNERS[mode]
-        ms = measure_runner(block, x, runner, args.microbatch, args.measure, args.warmup, args.iters)
+        ms, peak_alloc_mb, peak_reserved_mb = measure_runner(
+            block, x, runner, args.microbatch, args.measure, args.warmup, args.iters
+        )
         if mode == "full":
             full_ms = ms
         if mode == "micro_serial":
@@ -332,14 +394,17 @@ def main():
             "tflops": round(tflops(total_flops, ms), 6),
             "speedup_vs_full": round(speedup_vs_full, 6),
             "speedup_vs_micro_serial": round(speedup_vs_micro_serial, 6),
+            "peak_memory_mb": round(peak_alloc_mb, 3),
+            "reserved_memory_mb": round(peak_reserved_mb, 3),
             **{key: round(value, 8) for key, value in errors.items()},
         }
         rows.append(row)
         print(
-            f"{mode:12s} {ms:.4f} ms | {row['tokens_s']:.1f} tok/s "
+            f"{mode:20s} {ms:.4f} ms | {row['tokens_s']:.1f} tok/s "
             f"| {row['tflops']:.2f} TFLOPs/s "
             f"| speedup_vs_full {speedup_vs_full:.3f}x "
-            f"| speedup_vs_micro_serial {speedup_vs_micro_serial:.3f}x"
+            f"| speedup_vs_micro_serial {speedup_vs_micro_serial:.3f}x "
+            f"| peak_mem {peak_alloc_mb:.1f} MiB"
         )
 
     with csv_path.open("w", newline="", encoding="utf-8") as f:

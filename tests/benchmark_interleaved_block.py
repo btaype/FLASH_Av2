@@ -225,9 +225,55 @@ def train_micro_accum(block: SyntheticTransformerBlock, x: torch.Tensor, microba
         loss.backward()
 
 
+def train_interleaved_accum(block: SyntheticTransformerBlock, x: torch.Tensor, microbatch: int) -> None:
+    chunks = split_microbatches(x, microbatch)
+    current_stream = torch.cuda.current_stream()
+    attn_stream, mlp_stream, attn_done, mlp_done = get_interleaved_state(len(chunks))
+    attn_outputs: list[torch.Tensor | None] = [None] * len(chunks)
+    loss_scale = 1.0 / len(chunks)
+
+    def backward_chunk(idx: int) -> None:
+        current_stream.wait_event(mlp_done[idx])
+        assert attn_outputs[idx] is not None
+        out = attn_outputs[idx]
+        loss = out.float().square().mean() * loss_scale
+        loss.backward()
+        attn_outputs[idx] = None
+
+    for idx, chunk in enumerate(chunks):
+        with torch.cuda.stream(attn_stream):
+            chunk.record_stream(attn_stream)
+            attn_outputs[idx] = block.attention_stage(chunk)
+            attn_outputs[idx].record_stream(attn_stream)
+            attn_done[idx].record(attn_stream)
+
+        if idx > 0:
+            prev = idx - 1
+            with torch.cuda.stream(mlp_stream):
+                mlp_stream.wait_event(attn_done[prev])
+                assert attn_outputs[prev] is not None
+                attn_outputs[prev].record_stream(mlp_stream)
+                attn_outputs[prev] = block.mlp_stage(attn_outputs[prev])
+                attn_outputs[prev].record_stream(mlp_stream)
+                mlp_done[prev].record(mlp_stream)
+            backward_chunk(prev)
+
+    last = len(chunks) - 1
+    with torch.cuda.stream(mlp_stream):
+        mlp_stream.wait_event(attn_done[last])
+        assert attn_outputs[last] is not None
+        attn_outputs[last].record_stream(mlp_stream)
+        attn_outputs[last] = block.mlp_stage(attn_outputs[last])
+        attn_outputs[last].record_stream(mlp_stream)
+        mlp_done[last].record(mlp_stream)
+    backward_chunk(last)
+
+
 ACCUM_TRAINERS = {
     "full": train_full_batch,
     "micro_serial": train_micro_accum,
+    "interleaved": train_interleaved_accum,
+    "interleaved_prealloc": train_interleaved_accum,
 }
 
 
@@ -415,7 +461,7 @@ def main():
                 "peak_memory_mb": "",
                 "reserved_memory_mb": "",
                 "status": "unsupported",
-                "error": "fwd_bwd_accum solo esta implementado para full y micro_serial",
+                "error": f"fwd_bwd_accum no esta implementado para {mode}",
                 **{key: round(value, 8) for key, value in errors.items()},
             }
             rows.append(row)

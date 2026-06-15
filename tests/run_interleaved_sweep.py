@@ -18,7 +18,7 @@ DEFAULT_CONFIGS = [
 def parse_args():
     parser = argparse.ArgumentParser(description="Corre una matriz de benchmarks interleaved y consolida CSV.")
     parser.add_argument("--backend", choices=["native", "native_fast", "official", "sdpa", "auto"], default="native_fast")
-    parser.add_argument("--measure", choices=["fwd", "fwd_bwd"], default="fwd")
+    parser.add_argument("--measure", choices=["fwd", "fwd_bwd", "fwd_bwd_accum"], default="fwd")
     parser.add_argument("--hidden-dim", type=int, default=1024)
     parser.add_argument("--heads", type=int, default=8)
     parser.add_argument("--head-dim", type=int, default=128)

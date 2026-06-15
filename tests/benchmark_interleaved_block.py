@@ -1,5 +1,6 @@
 import argparse
 import csv
+import gc
 import math
 from pathlib import Path
 
@@ -209,6 +210,27 @@ RUNNERS = {
 }
 
 
+def train_full_batch(block: SyntheticTransformerBlock, x: torch.Tensor, microbatch: int) -> None:
+    del microbatch
+    out = block(x)
+    out.float().square().mean().backward()
+
+
+def train_micro_accum(block: SyntheticTransformerBlock, x: torch.Tensor, microbatch: int) -> None:
+    chunks = split_microbatches(x, microbatch)
+    loss_scale = 1.0 / len(chunks)
+    for chunk in chunks:
+        out = block(chunk)
+        loss = out.float().square().mean() * loss_scale
+        loss.backward()
+
+
+ACCUM_TRAINERS = {
+    "full": train_full_batch,
+    "micro_serial": train_micro_accum,
+}
+
+
 def block_fwd_flops(batch: int, seqlen: int, hidden_dim: int, mlp_ratio: float, causal: bool) -> float:
     qkv = 6.0 * batch * seqlen * hidden_dim * hidden_dim
     out_proj = 2.0 * batch * seqlen * hidden_dim * hidden_dim
@@ -245,11 +267,15 @@ def reset_grads(block: nn.Module, x: torch.Tensor) -> None:
         x.grad = None
 
 
-def measure_runner(block, x, runner, microbatch, measure, warmup, iters) -> tuple[float, float, float]:
+def measure_runner(block, x, mode, runner, microbatch, measure, warmup, iters) -> tuple[float, float, float]:
     def run_once():
         if measure == "fwd":
             with torch.no_grad():
                 return runner(block, x, microbatch)
+        if measure == "fwd_bwd_accum":
+            reset_grads(block, x)
+            ACCUM_TRAINERS[mode](block, x, microbatch)
+            return None
         reset_grads(block, x)
         out = runner(block, x, microbatch)
         loss = out.float().square().mean()
@@ -299,7 +325,7 @@ def parse_args():
         choices=["full", "micro_serial", "interleaved", "interleaved_prealloc", "all"],
         default="all",
     )
-    parser.add_argument("--measure", choices=["fwd", "fwd_bwd"], default="fwd")
+    parser.add_argument("--measure", choices=["fwd", "fwd_bwd", "fwd_bwd_accum"], default="fwd")
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--microbatch", type=int, default=2)
     parser.add_argument("--seqlen", type=int, default=512)
@@ -363,17 +389,46 @@ def main():
     full_ms = None
     micro_serial_ms = None
     total_flops = block_fwd_flops(args.batch, args.seqlen, args.hidden_dim, args.mlp_ratio, args.causal)
-    if args.measure == "fwd_bwd":
+    if args.measure in ("fwd_bwd", "fwd_bwd_accum"):
         total_flops *= 3.0
 
     for mode in modes:
         torch.cuda.empty_cache()
         runner = RUNNERS[mode]
+        if args.measure == "fwd_bwd_accum" and mode not in ACCUM_TRAINERS:
+            row = {
+                "mode": mode,
+                "backend": args.backend,
+                "measure": args.measure,
+                "batch": args.batch,
+                "microbatch": args.microbatch,
+                "seqlen": args.seqlen,
+                "hidden_dim": args.hidden_dim,
+                "heads": args.heads,
+                "head_dim": args.head_dim,
+                "causal": args.causal,
+                "ms": "",
+                "tokens_s": "",
+                "tflops": "",
+                "speedup_vs_full": "",
+                "speedup_vs_micro_serial": "",
+                "peak_memory_mb": "",
+                "reserved_memory_mb": "",
+                "status": "unsupported",
+                "error": "fwd_bwd_accum solo esta implementado para full y micro_serial",
+                **{key: round(value, 8) for key, value in errors.items()},
+            }
+            rows.append(row)
+            print(f"{mode:20s} unsupported | {row['error']}")
+            continue
         try:
             ms, peak_alloc_mb, peak_reserved_mb = measure_runner(
-                block, x, runner, args.microbatch, args.measure, args.warmup, args.iters
+                block, x, mode, runner, args.microbatch, args.measure, args.warmup, args.iters
             )
         except torch.OutOfMemoryError as exc:
+            error = str(exc).splitlines()[0]
+            reset_grads(block, x)
+            gc.collect()
             torch.cuda.empty_cache()
             row = {
                 "mode": mode,
@@ -394,7 +449,7 @@ def main():
                 "peak_memory_mb": "",
                 "reserved_memory_mb": "",
                 "status": "oom",
-                "error": str(exc).splitlines()[0],
+                "error": error,
                 **{key: round(value, 8) for key, value in errors.items()},
             }
             rows.append(row)

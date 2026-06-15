@@ -210,6 +210,126 @@ def train_micro_window(
         scaled_loss(out, len(window_chunks), num_chunks).backward()
 
 
+def mlp_parameters(block: SyntheticTransformerBlock) -> list[torch.nn.Parameter]:
+    return [
+        block.norm2.weight,
+        block.gate_proj.weight,
+        block.up_proj.weight,
+        block.down_proj.weight,
+    ]
+
+
+def accumulate_manual_grads(
+    params: list[torch.nn.Parameter],
+    grads: tuple[torch.Tensor | None, ...],
+) -> None:
+    for param, grad in zip(params, grads):
+        if grad is None:
+            continue
+        grad = grad.detach()
+        if param.grad is None:
+            param.grad = grad.clone()
+        else:
+            param.grad.add_(grad)
+
+
+def backward_mlp_then_attention(
+    block: SyntheticTransformerBlock,
+    attn_out: torch.Tensor,
+    loss_scale: float,
+) -> None:
+    detached_attn = attn_out.detach().requires_grad_(True)
+    out = block.mlp_stage(detached_attn)
+    loss = out.float().square().mean() * loss_scale
+    params = mlp_parameters(block)
+    grads = torch.autograd.grad(loss, [detached_attn, *params], allow_unused=False)
+    grad_attn = grads[0]
+    accumulate_manual_grads(params, grads[1:])
+    torch.autograd.backward(attn_out, grad_attn)
+
+
+def train_stage_split_serial(
+    block: SyntheticTransformerBlock,
+    x: torch.Tensor,
+    microbatch: int,
+    accum_window: int,
+) -> None:
+    if accum_window != 1:
+        raise ValueError("stage_split_serial usa accum_window=1.")
+    chunks = split_microbatches(x, microbatch)
+    loss_scale = 1.0 / len(chunks)
+    for chunk in chunks:
+        attn_out = block.attention_stage(chunk)
+        backward_mlp_then_attention(block, attn_out, loss_scale)
+
+
+def train_stage_split_interleaved_impl(
+    block: SyntheticTransformerBlock,
+    x: torch.Tensor,
+    microbatch: int,
+    accum_window: int,
+    priority_mode: str,
+) -> None:
+    if accum_window != 1:
+        raise ValueError("stage_split_interleaved usa accum_window=1.")
+
+    chunks = split_microbatches(x, microbatch)
+    current_stream = torch.cuda.current_stream()
+    attn_stream, stage_stream, attn_done, stage_done = get_priority_state(len(chunks), priority_mode)
+    attn_outputs: list[torch.Tensor | None] = [None] * len(chunks)
+    loss_scale = 1.0 / len(chunks)
+
+    def finish_chunk(idx: int) -> None:
+        with torch.cuda.stream(stage_stream):
+            stage_stream.wait_event(attn_done[idx])
+            assert attn_outputs[idx] is not None
+            attn_outputs[idx].record_stream(stage_stream)
+            backward_mlp_then_attention(block, attn_outputs[idx], loss_scale)
+            stage_done[idx].record(stage_stream)
+        attn_outputs[idx] = None
+
+    for idx, chunk in enumerate(chunks):
+        with torch.cuda.stream(attn_stream):
+            chunk.record_stream(attn_stream)
+            attn_outputs[idx] = block.attention_stage(chunk)
+            attn_outputs[idx].record_stream(attn_stream)
+            attn_done[idx].record(attn_stream)
+
+        if idx > 0:
+            finish_chunk(idx - 1)
+
+    finish_chunk(len(chunks) - 1)
+    for event in stage_done:
+        current_stream.wait_event(event)
+
+
+def train_stage_split_interleaved(
+    block: SyntheticTransformerBlock,
+    x: torch.Tensor,
+    microbatch: int,
+    accum_window: int,
+) -> None:
+    train_stage_split_interleaved_impl(block, x, microbatch, accum_window, "equal")
+
+
+def train_stage_split_interleaved_attn_high(
+    block: SyntheticTransformerBlock,
+    x: torch.Tensor,
+    microbatch: int,
+    accum_window: int,
+) -> None:
+    train_stage_split_interleaved_impl(block, x, microbatch, accum_window, "attn_high")
+
+
+def train_stage_split_interleaved_mlp_high(
+    block: SyntheticTransformerBlock,
+    x: torch.Tensor,
+    microbatch: int,
+    accum_window: int,
+) -> None:
+    train_stage_split_interleaved_impl(block, x, microbatch, accum_window, "mlp_high")
+
+
 def checkpoint_block_forward(block: SyntheticTransformerBlock, x: torch.Tensor) -> torch.Tensor:
     return checkpoint(lambda value: block(value), x, use_reentrant=False)
 
@@ -356,6 +476,10 @@ def train_overlap_fwd_bwd_bwd_high(
 TRAIN_RUNNERS: dict[str, TrainFn] = {
     "full": train_full,
     "micro_window": train_micro_window,
+    "stage_split_serial": train_stage_split_serial,
+    "stage_split_interleaved": train_stage_split_interleaved,
+    "stage_split_interleaved_attn_high": train_stage_split_interleaved_attn_high,
+    "stage_split_interleaved_mlp_high": train_stage_split_interleaved_mlp_high,
     "micro_checkpoint_block": train_micro_checkpoint_block,
     "micro_checkpoint_stages": train_micro_checkpoint_stages,
     "interleaved_window": train_interleaved,

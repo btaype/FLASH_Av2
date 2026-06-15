@@ -369,9 +369,37 @@ def main():
     for mode in modes:
         torch.cuda.empty_cache()
         runner = RUNNERS[mode]
-        ms, peak_alloc_mb, peak_reserved_mb = measure_runner(
-            block, x, runner, args.microbatch, args.measure, args.warmup, args.iters
-        )
+        try:
+            ms, peak_alloc_mb, peak_reserved_mb = measure_runner(
+                block, x, runner, args.microbatch, args.measure, args.warmup, args.iters
+            )
+        except torch.OutOfMemoryError as exc:
+            torch.cuda.empty_cache()
+            row = {
+                "mode": mode,
+                "backend": args.backend,
+                "measure": args.measure,
+                "batch": args.batch,
+                "microbatch": args.microbatch,
+                "seqlen": args.seqlen,
+                "hidden_dim": args.hidden_dim,
+                "heads": args.heads,
+                "head_dim": args.head_dim,
+                "causal": args.causal,
+                "ms": "",
+                "tokens_s": "",
+                "tflops": "",
+                "speedup_vs_full": "",
+                "speedup_vs_micro_serial": "",
+                "peak_memory_mb": "",
+                "reserved_memory_mb": "",
+                "status": "oom",
+                "error": str(exc).splitlines()[0],
+                **{key: round(value, 8) for key, value in errors.items()},
+            }
+            rows.append(row)
+            print(f"{mode:20s} OOM | {row['error']}")
+            continue
         if mode == "full":
             full_ms = ms
         if mode == "micro_serial":
@@ -396,6 +424,8 @@ def main():
             "speedup_vs_micro_serial": round(speedup_vs_micro_serial, 6),
             "peak_memory_mb": round(peak_alloc_mb, 3),
             "reserved_memory_mb": round(peak_reserved_mb, 3),
+            "status": "ok",
+            "error": "",
             **{key: round(value, 8) for key, value in errors.items()},
         }
         rows.append(row)

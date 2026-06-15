@@ -30,6 +30,11 @@ _PRIORITY_STATE: dict[
     tuple[torch.cuda.Stream, torch.cuda.Stream, list[torch.cuda.Event], list[torch.cuda.Event]],
 ] = {}
 
+_OVERLAP_STATE: dict[
+    tuple[int, int, str],
+    tuple[torch.cuda.Stream, torch.cuda.Stream, list[torch.cuda.Event], list[torch.cuda.Event]],
+] = {}
+
 
 def get_priority_state(
     num_chunks: int,
@@ -58,6 +63,36 @@ def get_priority_state(
         [torch.cuda.Event() for _ in range(num_chunks)],
     )
     _PRIORITY_STATE[key] = state
+    return state
+
+
+def get_overlap_state(
+    num_chunks: int,
+    priority_mode: str,
+) -> tuple[torch.cuda.Stream, torch.cuda.Stream, list[torch.cuda.Event], list[torch.cuda.Event]]:
+    device = torch.cuda.current_device()
+    key = (device, num_chunks, priority_mode)
+    state = _OVERLAP_STATE.get(key)
+    if state is not None:
+        return state
+
+    least_priority, greatest_priority = torch.cuda.Stream.priority_range()
+    fwd_priority = 0
+    bwd_priority = 0
+    if priority_mode == "fwd_high":
+        fwd_priority = greatest_priority
+        bwd_priority = least_priority
+    elif priority_mode == "bwd_high":
+        fwd_priority = least_priority
+        bwd_priority = greatest_priority
+
+    state = (
+        torch.cuda.Stream(device=device, priority=fwd_priority),
+        torch.cuda.Stream(device=device, priority=bwd_priority),
+        [torch.cuda.Event() for _ in range(num_chunks)],
+        [torch.cuda.Event() for _ in range(num_chunks)],
+    )
+    _OVERLAP_STATE[key] = state
     return state
 
 
@@ -250,6 +285,74 @@ def train_interleaved_mlp_high(
     train_interleaved_window(run_interleaved_mlp_high, block, x, microbatch, accum_window)
 
 
+def train_overlap_fwd_bwd_impl(
+    block: SyntheticTransformerBlock,
+    x: torch.Tensor,
+    microbatch: int,
+    accum_window: int,
+    priority_mode: str,
+) -> None:
+    if accum_window != 1:
+        raise ValueError("overlap_fwd_bwd usa accum_window=1 para mantener un solo backward activo.")
+
+    chunks = split_microbatches(x, microbatch)
+    current_stream = torch.cuda.current_stream()
+    fwd_stream, bwd_stream, fwd_done, bwd_done = get_overlap_state(len(chunks), priority_mode)
+    losses: list[torch.Tensor | None] = [None] * len(chunks)
+    loss_scale = 1.0 / len(chunks)
+
+    def schedule_backward(idx: int) -> None:
+        with torch.cuda.stream(bwd_stream):
+            bwd_stream.wait_event(fwd_done[idx])
+            assert losses[idx] is not None
+            losses[idx].backward()
+            bwd_done[idx].record(bwd_stream)
+        losses[idx] = None
+
+    for idx, chunk in enumerate(chunks):
+        with torch.cuda.stream(fwd_stream):
+            chunk.record_stream(fwd_stream)
+            out = block(chunk)
+            out.record_stream(fwd_stream)
+            losses[idx] = out.float().square().mean() * loss_scale
+            losses[idx].record_stream(fwd_stream)
+            fwd_done[idx].record(fwd_stream)
+
+        if idx > 0:
+            schedule_backward(idx - 1)
+
+    schedule_backward(len(chunks) - 1)
+    for event in bwd_done:
+        current_stream.wait_event(event)
+
+
+def train_overlap_fwd_bwd(
+    block: SyntheticTransformerBlock,
+    x: torch.Tensor,
+    microbatch: int,
+    accum_window: int,
+) -> None:
+    train_overlap_fwd_bwd_impl(block, x, microbatch, accum_window, "equal")
+
+
+def train_overlap_fwd_bwd_fwd_high(
+    block: SyntheticTransformerBlock,
+    x: torch.Tensor,
+    microbatch: int,
+    accum_window: int,
+) -> None:
+    train_overlap_fwd_bwd_impl(block, x, microbatch, accum_window, "fwd_high")
+
+
+def train_overlap_fwd_bwd_bwd_high(
+    block: SyntheticTransformerBlock,
+    x: torch.Tensor,
+    microbatch: int,
+    accum_window: int,
+) -> None:
+    train_overlap_fwd_bwd_impl(block, x, microbatch, accum_window, "bwd_high")
+
+
 TRAIN_RUNNERS: dict[str, TrainFn] = {
     "full": train_full,
     "micro_window": train_micro_window,
@@ -258,6 +361,9 @@ TRAIN_RUNNERS: dict[str, TrainFn] = {
     "interleaved_window": train_interleaved,
     "interleaved_attn_high_window": train_interleaved_attn_high,
     "interleaved_mlp_high_window": train_interleaved_mlp_high,
+    "overlap_fwd_bwd": train_overlap_fwd_bwd,
+    "overlap_fwd_bwd_fwd_high": train_overlap_fwd_bwd_fwd_high,
+    "overlap_fwd_bwd_bwd_high": train_overlap_fwd_bwd_bwd_high,
 }
 
 

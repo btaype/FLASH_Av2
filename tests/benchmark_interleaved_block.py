@@ -210,13 +210,25 @@ RUNNERS = {
 }
 
 
-def train_full_batch(block: SyntheticTransformerBlock, x: torch.Tensor, microbatch: int) -> None:
+def train_full_batch(
+    block: SyntheticTransformerBlock,
+    x: torch.Tensor,
+    microbatch: int,
+    accum_window: int,
+) -> None:
     del microbatch
+    del accum_window
     out = block(x)
     out.float().square().mean().backward()
 
 
-def train_micro_accum(block: SyntheticTransformerBlock, x: torch.Tensor, microbatch: int) -> None:
+def train_micro_accum(
+    block: SyntheticTransformerBlock,
+    x: torch.Tensor,
+    microbatch: int,
+    accum_window: int,
+) -> None:
+    del accum_window
     chunks = split_microbatches(x, microbatch)
     loss_scale = 1.0 / len(chunks)
     for chunk in chunks:
@@ -225,55 +237,30 @@ def train_micro_accum(block: SyntheticTransformerBlock, x: torch.Tensor, microba
         loss.backward()
 
 
-def train_interleaved_accum(block: SyntheticTransformerBlock, x: torch.Tensor, microbatch: int) -> None:
+def train_interleaved_window_accum(
+    block: SyntheticTransformerBlock,
+    x: torch.Tensor,
+    microbatch: int,
+    accum_window: int,
+) -> None:
+    if accum_window < 1:
+        raise ValueError("accum_window debe ser >= 1.")
     chunks = split_microbatches(x, microbatch)
-    current_stream = torch.cuda.current_stream()
-    attn_stream, mlp_stream, attn_done, mlp_done = get_interleaved_state(len(chunks))
-    attn_outputs: list[torch.Tensor | None] = [None] * len(chunks)
-    loss_scale = 1.0 / len(chunks)
-
-    def backward_chunk(idx: int) -> None:
-        current_stream.wait_event(mlp_done[idx])
-        assert attn_outputs[idx] is not None
-        out = attn_outputs[idx]
+    num_chunks = len(chunks)
+    for start in range(0, num_chunks, accum_window):
+        window_chunks = chunks[start : start + accum_window]
+        window_x = torch.cat(window_chunks, dim=0)
+        out = run_interleaved(block, window_x, microbatch)
+        loss_scale = len(window_chunks) / num_chunks
         loss = out.float().square().mean() * loss_scale
         loss.backward()
-        attn_outputs[idx] = None
-
-    for idx, chunk in enumerate(chunks):
-        with torch.cuda.stream(attn_stream):
-            chunk.record_stream(attn_stream)
-            attn_outputs[idx] = block.attention_stage(chunk)
-            attn_outputs[idx].record_stream(attn_stream)
-            attn_done[idx].record(attn_stream)
-
-        if idx > 0:
-            prev = idx - 1
-            with torch.cuda.stream(mlp_stream):
-                mlp_stream.wait_event(attn_done[prev])
-                assert attn_outputs[prev] is not None
-                attn_outputs[prev].record_stream(mlp_stream)
-                attn_outputs[prev] = block.mlp_stage(attn_outputs[prev])
-                attn_outputs[prev].record_stream(mlp_stream)
-                mlp_done[prev].record(mlp_stream)
-            backward_chunk(prev)
-
-    last = len(chunks) - 1
-    with torch.cuda.stream(mlp_stream):
-        mlp_stream.wait_event(attn_done[last])
-        assert attn_outputs[last] is not None
-        attn_outputs[last].record_stream(mlp_stream)
-        attn_outputs[last] = block.mlp_stage(attn_outputs[last])
-        attn_outputs[last].record_stream(mlp_stream)
-        mlp_done[last].record(mlp_stream)
-    backward_chunk(last)
 
 
 ACCUM_TRAINERS = {
     "full": train_full_batch,
     "micro_serial": train_micro_accum,
-    "interleaved": train_interleaved_accum,
-    "interleaved_prealloc": train_interleaved_accum,
+    "interleaved": train_interleaved_window_accum,
+    "interleaved_prealloc": train_interleaved_window_accum,
 }
 
 
@@ -313,14 +300,24 @@ def reset_grads(block: nn.Module, x: torch.Tensor) -> None:
         x.grad = None
 
 
-def measure_runner(block, x, mode, runner, microbatch, measure, warmup, iters) -> tuple[float, float, float]:
+def measure_runner(
+    block,
+    x,
+    mode,
+    runner,
+    microbatch,
+    measure,
+    warmup,
+    iters,
+    accum_window,
+) -> tuple[float, float, float]:
     def run_once():
         if measure == "fwd":
             with torch.no_grad():
                 return runner(block, x, microbatch)
         if measure == "fwd_bwd_accum":
             reset_grads(block, x)
-            ACCUM_TRAINERS[mode](block, x, microbatch)
+            ACCUM_TRAINERS[mode](block, x, microbatch, accum_window)
             return None
         reset_grads(block, x)
         out = runner(block, x, microbatch)
@@ -384,6 +381,12 @@ def parse_args():
     parser.add_argument("--requires-input-grad", action="store_true")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
+    parser.add_argument(
+        "--accum-window",
+        type=int,
+        default=1,
+        help="Microbatches por ventana en fwd_bwd_accum. 1 usa minima memoria; >1 prueba mas solapamiento con mas memoria.",
+    )
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--out-dir", default="interleaved_benchmark_results")
     parser.add_argument("--no-verify", action="store_true")
@@ -396,6 +399,8 @@ def main():
         raise RuntimeError("CUDA no esta disponible.")
     if args.batch % args.microbatch != 0:
         raise ValueError("batch debe ser divisible por microbatch.")
+    if args.accum_window < 1:
+        raise ValueError("accum_window debe ser >= 1.")
 
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
@@ -408,7 +413,7 @@ def main():
         backend=args.backend,
         causal=args.causal,
     ).to(device="cuda", dtype=dtype)
-    block.train(args.measure == "fwd_bwd")
+    block.train(args.measure in ("fwd_bwd", "fwd_bwd_accum"))
     x = make_input(args, dtype)
 
     out_dir = Path(args.out_dir)
@@ -420,6 +425,8 @@ def main():
     print(f"measure: {args.measure}")
     print(f"batch={args.batch} microbatch={args.microbatch} seqlen={args.seqlen}")
     print(f"hidden_dim={args.hidden_dim} heads={args.heads} head_dim={args.head_dim}")
+    if args.measure == "fwd_bwd_accum":
+        print(f"accum_window={args.accum_window}")
 
     errors = {} if args.no_verify else verify_outputs(block, x.detach(), args.microbatch)
     if errors:
@@ -453,6 +460,7 @@ def main():
                 "heads": args.heads,
                 "head_dim": args.head_dim,
                 "causal": args.causal,
+                "accum_window": args.accum_window if args.measure == "fwd_bwd_accum" else "",
                 "ms": "",
                 "tokens_s": "",
                 "tflops": "",
@@ -469,7 +477,15 @@ def main():
             continue
         try:
             ms, peak_alloc_mb, peak_reserved_mb = measure_runner(
-                block, x, mode, runner, args.microbatch, args.measure, args.warmup, args.iters
+                block,
+                x,
+                mode,
+                runner,
+                args.microbatch,
+                args.measure,
+                args.warmup,
+                args.iters,
+                args.accum_window,
             )
         except torch.OutOfMemoryError as exc:
             error = str(exc).splitlines()[0]
@@ -487,6 +503,7 @@ def main():
                 "heads": args.heads,
                 "head_dim": args.head_dim,
                 "causal": args.causal,
+                "accum_window": args.accum_window if args.measure == "fwd_bwd_accum" else "",
                 "ms": "",
                 "tokens_s": "",
                 "tflops": "",
@@ -518,6 +535,7 @@ def main():
             "heads": args.heads,
             "head_dim": args.head_dim,
             "causal": args.causal,
+            "accum_window": args.accum_window if args.measure == "fwd_bwd_accum" else "",
             "ms": round(ms, 6),
             "tokens_s": round(args.batch * args.seqlen / (ms / 1000.0), 3),
             "tflops": round(tflops(total_flops, ms), 6),

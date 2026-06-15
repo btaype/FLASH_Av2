@@ -25,6 +25,7 @@ def parse_args():
     parser.add_argument("--dtype", choices=["float16", "float32"], default="float16")
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--iters", type=int, default=10)
+    parser.add_argument("--accum-window", type=int, default=1)
     parser.add_argument("--out-dir", default="interleaved_benchmark_results/sweep")
     parser.add_argument("--csv-name", default="interleaved_sweep_results.csv")
     parser.add_argument("--verify", action="store_true")
@@ -70,6 +71,8 @@ def main():
             str(args.warmup),
             "--iters",
             str(args.iters),
+            "--accum-window",
+            str(args.accum_window),
             "--out-dir",
             str(case_dir),
         ]
